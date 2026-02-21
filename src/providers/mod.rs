@@ -20,6 +20,7 @@ pub mod anthropic;
 pub mod bedrock;
 pub mod compatible;
 pub mod copilot;
+pub mod deepseek;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
@@ -1070,8 +1071,9 @@ fn create_provider_with_url_and_options(
         "xai" | "grok" => Ok(Box::new(OpenAiCompatibleProvider::new(
             "xAI", "https://api.x.ai", key, AuthStyle::Bearer,
         ))),
-        "deepseek" => Ok(Box::new(OpenAiCompatibleProvider::new(
-            "DeepSeek", "https://api.deepseek.com", key, AuthStyle::Bearer,
+        "deepseek" => Ok(Box::new(deepseek::DeepSeekProvider::new(
+            resolved_credential.clone(),
+            "deepseek-chat".to_string(),
         ))),
         "together" | "together-ai" => Ok(Box::new(OpenAiCompatibleProvider::new(
             "Together AI", "https://api.together.xyz", key, AuthStyle::Bearer,
