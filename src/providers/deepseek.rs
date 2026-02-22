@@ -168,6 +168,11 @@ impl DeepSeekProvider {
             .collect()
     }
 
+    /// 尝试将内容解析为 JSON，失败时返回 None
+    fn try_parse_json(content: &str) -> Option<serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(content).ok()
+    }
+
     /// 转换单条消息
     fn convert_single_message(&self, m: &ChatMessage) -> Message {
         match m.role.as_str() {
@@ -179,7 +184,7 @@ impl DeepSeekProvider {
 
     /// 转换 assistant 消息（可能包含 tool_calls）
     fn convert_assistant_message(&self, content: &str) -> Message {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        let Some(value) = Self::try_parse_json(content) else {
             return Message::simple("assistant", content);
         };
 
@@ -223,7 +228,7 @@ impl DeepSeekProvider {
 
     /// 转换 tool 消息（工具调用结果）
     fn convert_tool_message(&self, content: &str) -> Message {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        let Some(value) = Self::try_parse_json(content) else {
             return Message::simple("tool", content);
         };
 
@@ -307,8 +312,26 @@ impl DeepSeekProvider {
         Ok(chat_resp)
     }
 
+    /// 从 API 工具调用转换为内部工具调用
+    fn convert_api_tool_calls(
+        tool_calls: Option<Vec<ToolCall>>,
+    ) -> Vec<crate::providers::traits::ToolCall> {
+        tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|tc| {
+                let function = tc.function?;
+                Some(crate::providers::traits::ToolCall {
+                    id: tc.id?,
+                    name: function.name?,
+                    arguments: function.arguments?,
+                })
+            })
+            .collect()
+    }
+
     /// 从 API 响应中提取需要的数据
-    /// 返回: (文本内容, 工具调用列表, 推理内容, 完成原因)
+    /// 返回: (文本内容, 工具调用列表, 推理内容, 完成原因, token使用统计)
     fn extract_response(
         &self,
         chat_resp: ChatResponse,
@@ -317,6 +340,7 @@ impl DeepSeekProvider {
         Vec<crate::providers::traits::ToolCall>,
         Option<String>,
         Option<FinishReason>,
+        Option<crate::providers::traits::TokenUsage>,
     )> {
         let choice = chat_resp
             .choices
@@ -328,24 +352,17 @@ impl DeepSeekProvider {
         let text = message.effective_content_optional();
         let finish_reason = choice.finish_reason;
 
-        // 提取工具调用
-        let tool_calls: Vec<crate::providers::traits::ToolCall> = message
-            .tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|tc| {
-                let function = tc.function?;
-                Some(crate::providers::traits::ToolCall {
-                    id: tc.id?,
-                    name: function.name?,
-                    arguments: function.arguments?,
-                })
-            })
-            .collect();
-
+        let tool_calls = Self::convert_api_tool_calls(message.tool_calls);
         let reasoning = message.reasoning_content;
 
-        Ok((text, tool_calls, reasoning, finish_reason))
+        let usage = chat_resp
+            .usage
+            .map(|u| crate::providers::traits::TokenUsage {
+                input_tokens: u.prompt_tokens.map(|v| v as u64),
+                output_tokens: u.completion_tokens.map(|v| v as u64),
+            });
+
+        Ok((text, tool_calls, reasoning, finish_reason, usage))
     }
 }
 
@@ -394,7 +411,7 @@ impl Provider for DeepSeekProvider {
 
         let req = self.build_chat_request(&messages, None, None, None);
         let chat_resp = self.send_chat_request(req).await?;
-        let (text, _, _, _) = self.extract_response(chat_resp)?;
+        let (text, _, _, _, _) = self.extract_response(chat_resp)?;
 
         text.ok_or_else(|| anyhow::anyhow!("No content in response"))
     }
@@ -407,7 +424,7 @@ impl Provider for DeepSeekProvider {
     ) -> anyhow::Result<String> {
         let req = self.build_chat_request(messages, None, None, None);
         let chat_resp = self.send_chat_request(req).await?;
-        let (text, _, _, _) = self.extract_response(chat_resp)?;
+        let (text, _, _, _, _) = self.extract_response(chat_resp)?;
 
         text.ok_or_else(|| anyhow::anyhow!("No content in response"))
     }
@@ -420,9 +437,15 @@ impl Provider for DeepSeekProvider {
     ) -> anyhow::Result<ProviderChatResponse> {
         let req = self.build_chat_request(request.messages, request.tools, None, None);
         let chat_resp = self.send_chat_request(req).await?;
-        let (text, tool_calls, _reasoning, _finish_reason) = self.extract_response(chat_resp)?;
+        let (text, tool_calls, reasoning, _finish_reason, usage) =
+            self.extract_response(chat_resp)?;
 
-        Ok(ProviderChatResponse { text, tool_calls })
+        Ok(ProviderChatResponse {
+            text,
+            tool_calls,
+            usage,
+            reasoning_content: reasoning,
+        })
     }
 
     fn supports_streaming(&self) -> bool {
@@ -1595,7 +1618,7 @@ mod tests {
             system_fingerprint: None,
         };
 
-        let (text, tool_calls, reasoning, finish_reason) =
+        let (text, tool_calls, reasoning, finish_reason, _) =
             provider.extract_response(response).unwrap();
 
         assert_eq!(text, Some("Hello".to_string()));
@@ -1634,7 +1657,7 @@ mod tests {
             system_fingerprint: None,
         };
 
-        let (text, tool_calls, reasoning, finish_reason) =
+        let (text, tool_calls, reasoning, finish_reason, _) =
             provider.extract_response(response).unwrap();
 
         assert!(text.is_none());
