@@ -182,6 +182,41 @@ pub fn all_tools(
     )
 }
 
+/// Load markdown agents from workspace/agents/ directory and merge with config agents.
+/// Returns the merged agent configurations.
+fn load_markdown_agents(
+    workspace_dir: &std::path::Path,
+    config_agents: &HashMap<String, DelegateAgentConfig>,
+    root_config: &crate::config::Config,
+) -> HashMap<String, DelegateAgentConfig> {
+    let mut merged_agents: HashMap<String, DelegateAgentConfig> = config_agents
+        .iter()
+        .map(|(name, cfg)| (name.clone(), cfg.clone()))
+        .collect();
+
+    let md_agents_dir = workspace_dir.join("agents");
+    let provider = root_config
+        .default_provider
+        .clone()
+        .unwrap_or_else(|| "openrouter".to_string());
+    let model = root_config
+        .default_model
+        .clone()
+        .unwrap_or_else(|| "anthropic/claude-sonnet-4.6".to_string());
+
+    if let Ok(md_agents) = crate::agent::agents_md::load_agents(&md_agents_dir, &provider, &model) {
+        if !md_agents.is_empty() {
+            let md_count = md_agents.len();
+            for md_agent in md_agents {
+                merged_agents.insert(md_agent.name, md_agent.config);
+            }
+            tracing::info!("Loaded {} agents from workspace/agents/", md_count);
+        }
+    }
+
+    merged_agents
+}
+
 /// Create full tool registry including memory tools and optional Composio.
 #[allow(clippy::implicit_hasher, clippy::too_many_arguments)]
 pub fn all_tools_with_runtime(
@@ -293,8 +328,11 @@ pub fn all_tools_with_runtime(
         }
     }
 
+    // Merge markdown agents from workspace/agents/ with config agents
+    let merged_agents = load_markdown_agents(workspace_dir, agents, root_config);
+
     // Add delegation tool when agents are configured
-    if !agents.is_empty() {
+    if !merged_agents.is_empty() {
         let delegate_agents: HashMap<String, DelegateAgentConfig> = agents
             .iter()
             .map(|(name, cfg)| (name.clone(), cfg.clone()))
