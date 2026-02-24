@@ -343,7 +343,7 @@ pub fn all_tools_with_runtime(
         });
         let parent_tools = Arc::new(tool_arcs.clone());
         let delegate_tool = DelegateTool::new_with_options(
-            delegate_agents,
+            merged_agents,
             delegate_fallback_credential,
             security.clone(),
             crate::providers::ProviderRuntimeOptions {
