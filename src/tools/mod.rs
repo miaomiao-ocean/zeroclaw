@@ -333,7 +333,7 @@ pub fn all_tools_with_runtime(
 
     // Add delegation tool when agents are configured
     if !merged_agents.is_empty() {
-        let delegate_agents: HashMap<String, DelegateAgentConfig> = agents
+        let delegate_agents: HashMap<String, DelegateAgentConfig> = merged_agents
             .iter()
             .map(|(name, cfg)| (name.clone(), cfg.clone()))
             .collect();
