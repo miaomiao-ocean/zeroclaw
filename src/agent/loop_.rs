@@ -1950,14 +1950,22 @@ pub(crate) async fn run_tool_call_loop(
         // Native mode: use JSON-structured messages so convert_messages() can
         // reconstruct proper OpenAI-format tool_calls and tool result messages.
         // Prompt mode: use XML-based text format as before.
+
+        // Check if assistant message actually contains tool_calls before adding tool results.
+        // This prevents DeepSeek API errors when assistant content is plain text
+        // (e.g., when fallback parsing succeeded but tool_call_id was missing).
+        let assistant_has_tool_calls = assistant_history_content.contains("\"tool_calls\"");
+
         history.push(ChatMessage::assistant(assistant_history_content));
+
         if native_tool_calls.is_empty() {
             let all_results_have_ids = use_native_tools
                 && !individual_results.is_empty()
                 && individual_results
                     .iter()
                     .all(|(tool_call_id, _)| tool_call_id.is_some());
-            if all_results_have_ids {
+            // Only add tool messages if assistant actually has tool_calls
+            if all_results_have_ids && assistant_has_tool_calls {
                 for (tool_call_id, result) in &individual_results {
                     let tool_msg = serde_json::json!({
                         "tool_call_id": tool_call_id,

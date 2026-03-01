@@ -75,19 +75,22 @@ impl DeepSeekProvider {
         self
     }
 
-    /// 启用 thinking 模式（仅对非 reasoner 模型有效）
-    pub fn enable_thinking(mut self) -> Self {
+    /// 设置 thinking 模式（仅对非 reasoner 模型有效）
+    fn set_thinking(&mut self, enabled: bool) {
         if !Self::is_reasoner_model(&self.model) {
-            self.thinking_enabled = Some(true);
+            self.thinking_enabled = Some(enabled);
         }
+    }
+
+    /// 启用 thinking 模式
+    pub fn enable_thinking(mut self) -> Self {
+        self.set_thinking(true);
         self
     }
 
-    /// 禁用 thinking 模式（仅对非 reasoner 模型有效）
+    /// 禁用 thinking 模式
     pub fn disable_thinking(mut self) -> Self {
-        if !Self::is_reasoner_model(&self.model) {
-            self.thinking_enabled = Some(false);
-        }
+        self.set_thinking(false);
         self
     }
 
@@ -136,11 +139,29 @@ impl DeepSeekProvider {
         })
     }
 
+    /// 检查是否需要禁用某些参数（thinking 或 reasoner 模式下不支持这些参数）
+    fn temperature_params_disabled(&self) -> bool {
+        Self::is_reasoner_model(&self.model) || self.thinking_enabled == Some(true)
+    }
+
+    /// 根据条件返回 Some(value) 或 None
+    fn param_if_enabled(&self, value: Option<f64>) -> Option<f64> {
+        if self.temperature_params_disabled() {
+            None
+        } else {
+            value
+        }
+    }
+
     /// 获取响应格式配置
     fn response_format(&self) -> Option<ResponseFormat> {
-        self.json_output_enabled.then(|| ResponseFormat {
-            kind: "json_object".to_string(),
-        })
+        if self.json_output_enabled {
+            Some(ResponseFormat {
+                kind: "json_object".to_string(),
+            })
+        } else {
+            None
+        }
     }
 
     fn convert_tools(&self, tools: Option<&[ToolSpec]>) -> Option<Vec<serde_json::Value>> {
@@ -182,45 +203,43 @@ impl DeepSeekProvider {
         }
     }
 
+    /// 从 JSON 中提取字符串字段
+    fn extract_string_field(value: &serde_json::Value, field: &str) -> Option<String> {
+        value
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+    }
+
     /// 转换 assistant 消息（可能包含 tool_calls）
     fn convert_assistant_message(&self, content: &str) -> Message {
         let Some(value) = Self::try_parse_json(content) else {
             return Message::simple("assistant", content);
         };
 
-        let Some(tool_calls_value) = value.get("tool_calls") else {
-            return Message::simple("assistant", content);
-        };
-
-        let Ok(parsed_calls) =
-            serde_json::from_value::<Vec<ProviderToolCall>>(tool_calls_value.clone())
-        else {
-            return Message::simple("assistant", content);
-        };
-
-        let tool_calls: Vec<ToolCall> = parsed_calls
-            .into_iter()
-            .map(|tc| ToolCall {
-                id: Some(tc.id),
-                kind: Some("function".to_string()),
-                function: Some(Function {
-                    name: Some(tc.name),
-                    arguments: Some(tc.arguments),
-                }),
-            })
-            .collect();
-
-        let text_content = value
-            .get("content")
-            .and_then(serde_json::Value::as_str)
-            .map(ToString::to_string);
+        let tool_calls = value
+            .get("tool_calls")
+            .and_then(|v| serde_json::from_value::<Vec<ProviderToolCall>>(v.clone()).ok())
+            .map(|calls| {
+                calls
+                    .into_iter()
+                    .map(|tc| ToolCall {
+                        id: Some(tc.id),
+                        kind: Some("function".to_string()),
+                        function: Some(Function {
+                            name: Some(tc.name),
+                            arguments: Some(tc.arguments),
+                        }),
+                    })
+                    .collect::<Vec<_>>()
+            });
 
         Message {
             role: "assistant".to_string(),
-            content: text_content,
+            content: Self::extract_string_field(&value, "content"),
             name: None,
             tool_call_id: None,
-            tool_calls: Some(tool_calls),
+            tool_calls,
             reasoning_content: None,
             prefix: None,
         }
@@ -232,21 +251,11 @@ impl DeepSeekProvider {
             return Message::simple("tool", content);
         };
 
-        let tool_call_id = value
-            .get("tool_call_id")
-            .and_then(serde_json::Value::as_str)
-            .map(ToString::to_string);
-
-        let text_content = value
-            .get("content")
-            .and_then(serde_json::Value::as_str)
-            .map(ToString::to_string);
-
         Message {
             role: "tool".to_string(),
-            content: text_content,
+            content: Self::extract_string_field(&value, "content"),
             name: None,
-            tool_call_id,
+            tool_call_id: Self::extract_string_field(&value, "tool_call_id"),
             tool_calls: None,
             reasoning_content: None,
             prefix: None,
@@ -267,11 +276,12 @@ impl DeepSeekProvider {
             response_format: self.response_format(),
             tools: self.convert_tools(tools),
             tool_choice: tools.as_ref().map(|_| ToolChoice::auto()),
-            temperature: self.temperature,
+            // thinking 或 reasoner 模式下不支持这些参数
+            temperature: self.param_if_enabled(self.temperature),
             max_tokens: self.max_tokens,
-            top_p: self.top_p,
-            frequency_penalty: self.frequency_penalty,
-            presence_penalty: self.presence_penalty,
+            top_p: self.param_if_enabled(self.top_p),
+            frequency_penalty: self.param_if_enabled(self.frequency_penalty),
+            presence_penalty: self.param_if_enabled(self.presence_penalty),
             stream,
             stream_options: stream_options.map(|opts| StreamOptionsPayload {
                 include_usage: opts.count_tokens,
@@ -349,7 +359,7 @@ impl DeepSeekProvider {
             .ok_or_else(|| anyhow::anyhow!("No choices in response"))?;
 
         let message = choice.message;
-        let text = message.effective_content_optional();
+        let text = message.effective_content();
         let finish_reason = choice.finish_reason;
 
         let tool_calls = Self::convert_api_tool_calls(message.tool_calls);
@@ -445,6 +455,7 @@ impl Provider for DeepSeekProvider {
             tool_calls,
             usage,
             reasoning_content: reasoning,
+            quota_metadata: None,
         })
     }
 
@@ -784,17 +795,7 @@ struct CompletionTokensDetails {
 
 impl ResponseMessage {
     /// 获取有效内容（优先使用 content，否则使用 reasoning_content）
-    fn effective_content(&self) -> String {
-        self.content
-            .as_ref()
-            .filter(|c| !c.is_empty())
-            .cloned()
-            .or_else(|| self.reasoning_content.clone())
-            .unwrap_or_default()
-    }
-
-    /// 获取有效内容（可选版本）
-    fn effective_content_optional(&self) -> Option<String> {
+    fn effective_content(&self) -> Option<String> {
         self.content
             .as_ref()
             .filter(|c| !c.is_empty())
@@ -1112,7 +1113,7 @@ mod tests {
             tool_calls: None,
             role: Some("assistant".to_string()),
         };
-        assert_eq!(msg.effective_content(), "hello");
+        assert_eq!(msg.effective_content(), Some("hello".to_string()));
     }
 
     #[test]
@@ -1123,32 +1124,7 @@ mod tests {
             tool_calls: None,
             role: Some("assistant".to_string()),
         };
-        assert_eq!(msg.effective_content(), "thinking");
-    }
-
-    #[test]
-    fn test_effective_content_optional_with_content() {
-        let msg = ResponseMessage {
-            content: Some("hello".to_string()),
-            reasoning_content: Some("thinking".to_string()),
-            tool_calls: None,
-            role: Some("assistant".to_string()),
-        };
-        assert_eq!(msg.effective_content_optional(), Some("hello".to_string()));
-    }
-
-    #[test]
-    fn test_effective_content_optional_empty_content() {
-        let msg = ResponseMessage {
-            content: Some(String::new()),
-            reasoning_content: Some("thinking".to_string()),
-            tool_calls: None,
-            role: Some("assistant".to_string()),
-        };
-        assert_eq!(
-            msg.effective_content_optional(),
-            Some("thinking".to_string())
-        );
+        assert_eq!(msg.effective_content(), Some("thinking".to_string()));
     }
 
     #[test]
@@ -1159,8 +1135,7 @@ mod tests {
             tool_calls: None,
             role: Some("assistant".to_string()),
         };
-        assert_eq!(msg.effective_content(), "");
-        assert!(msg.effective_content_optional().is_none());
+        assert!(msg.effective_content().is_none());
     }
 
     #[test]
@@ -1171,11 +1146,7 @@ mod tests {
             tool_calls: None,
             role: Some("assistant".to_string()),
         };
-        assert_eq!(msg.effective_content(), "reasoning only");
-        assert_eq!(
-            msg.effective_content_optional(),
-            Some("reasoning only".to_string())
-        );
+        assert_eq!(msg.effective_content(), Some("reasoning only".to_string()));
     }
 
     #[test]
@@ -1439,8 +1410,8 @@ mod tests {
             .with_top_p(0.9)
             .with_frequency_penalty(0.5)
             .with_presence_penalty(0.3)
-            .enable_json_output()
-            .enable_thinking();
+            .enable_json_output();
+        // 注意：未启用 thinking 模式，所以 temperature 等参数应该被包含
 
         let messages = vec![ChatMessage::user("Hello")];
         let request = provider.build_chat_request(&messages, None, None, None);
@@ -1452,7 +1423,60 @@ mod tests {
         assert_eq!(request.frequency_penalty, Some(0.5));
         assert_eq!(request.presence_penalty, Some(0.3));
         assert!(request.response_format.is_some());
+        assert!(request.thinking.is_some()); // thinking 默认是 disabled
+    }
+
+    #[test]
+    fn test_build_chat_request_thinking_disables_temperature_params() {
+        // Thinking 模式下，temperature, top_p, presence_penalty, frequency_penalty 会被禁用
+        let provider = DeepSeekProvider::new(Some("key".to_string()), "deepseek-chat".to_string())
+            .with_temperature(0.7)
+            .with_max_tokens(1000)
+            .with_top_p(0.9)
+            .with_frequency_penalty(0.5)
+            .with_presence_penalty(0.3)
+            .enable_json_output()
+            .enable_thinking();
+
+        let messages = vec![ChatMessage::user("Hello")];
+        let request = provider.build_chat_request(&messages, None, None, None);
+
+        assert_eq!(request.model, "deepseek-chat");
+        // Thinking 模式下这些参数应该被禁用
+        assert_eq!(request.temperature, None);
+        assert_eq!(request.top_p, None);
+        assert_eq!(request.frequency_penalty, None);
+        assert_eq!(request.presence_penalty, None);
+        assert_eq!(request.max_tokens, Some(1000)); // max_tokens 不受影响
+        assert!(request.response_format.is_some());
         assert!(request.thinking.is_some());
+    }
+
+    #[test]
+    fn test_build_chat_request_reasoner_model_disables_temperature_params() {
+        // Reasoner 模型也会禁用 temperature 等参数
+        let provider =
+            DeepSeekProvider::new(Some("key".to_string()), "deepseek-reasoner".to_string())
+                .with_temperature(0.7)
+                .with_max_tokens(1000)
+                .with_top_p(0.9)
+                .with_frequency_penalty(0.5)
+                .with_presence_penalty(0.3)
+                .enable_json_output();
+
+        let messages = vec![ChatMessage::user("Hello")];
+        let request = provider.build_chat_request(&messages, None, None, None);
+
+        assert_eq!(request.model, "deepseek-reasoner");
+        // Reasoner 模式下这些参数应该被禁用
+        assert_eq!(request.temperature, None);
+        assert_eq!(request.top_p, None);
+        assert_eq!(request.frequency_penalty, None);
+        assert_eq!(request.presence_penalty, None);
+        assert_eq!(request.max_tokens, Some(1000));
+        assert!(request.response_format.is_some());
+        // Reasoner 模型返回 None thinking 配置
+        assert!(request.thinking.is_none());
     }
 
     #[test]
