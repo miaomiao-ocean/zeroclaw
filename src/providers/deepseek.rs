@@ -125,6 +125,10 @@ struct ChatRequest {
     n: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     logit_bias: Option<HashMap<String, f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
 }
 
 /// Thinking 模式配置
@@ -443,6 +447,8 @@ pub struct DeepSeekProvider {
     n: Option<u32>,
     logit_bias: Option<HashMap<String, f64>>,
     stop: Option<Vec<String>>,
+    seed: Option<i64>,
+    user: Option<String>,
 }
 
 impl DeepSeekProvider {
@@ -469,6 +475,8 @@ impl DeepSeekProvider {
             n: None,
             logit_bias: None,
             stop: None,
+            seed: None,
+            user: None,
         }
     }
 
@@ -520,23 +528,6 @@ impl DeepSeekProvider {
                 })
                 .collect()
         })
-    }
-
-    /// 将工具规范转换为 JSON 格式（Provider trait 用）
-    fn tools_to_json(tools: &[ToolSpec]) -> Vec<json::Value> {
-        tools
-            .iter()
-            .map(|t| {
-                json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }
-                })
-            })
-            .collect()
     }
 
     /// 将通用消息格式转换为 DeepSeek API 格式
@@ -645,27 +636,40 @@ impl DeepSeekProvider {
             self.presence_penalty
         };
 
+        let stream_enabled = stream.unwrap_or(false);
+        let tools_enabled = tools.is_some();
+
         ChatRequest {
             model: self.model.clone(),
             messages: self.convert_messages(messages),
             thinking: self.thinking_config(),
             response_format: self.response_format(),
             tools: self.convert_tools(tools),
-            tool_choice: tools.as_ref().map(|_| ToolChoice::auto()),
+            tool_choice: if tools_enabled {
+                Some(ToolChoice::auto())
+            } else {
+                None
+            },
             temperature,
             max_tokens: self.max_tokens,
             top_p,
             frequency_penalty,
             presence_penalty,
             stream,
-            stream_options: stream_options.map(|opts| StreamOptionsPayload {
-                include_usage: opts.count_tokens,
-            }),
+            stream_options: if stream_enabled {
+                stream_options.map(|opts| StreamOptionsPayload {
+                    include_usage: opts.count_tokens,
+                })
+            } else {
+                None
+            },
             stop: self.stop.clone(),
             logprobs: None,
             top_logprobs: None,
             n: self.n,
             logit_bias: self.logit_bias.clone(),
+            seed: self.seed,
+            user: self.user.clone(),
         }
     }
 
@@ -1011,6 +1015,18 @@ impl DeepSeekProvider {
         self.stop = Some(stops.into_iter().take(4).collect());
         self
     }
+
+    /// 设置 seed（确定性采样）
+    pub fn with_seed(mut self, seed: i64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// 设置 user（用户标识）
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
+        self
+    }
 }
 
 // ========================================================================
@@ -1027,7 +1043,7 @@ impl Provider for DeepSeekProvider {
     }
 
     fn convert_tools(&self, tools: &[ToolSpec]) -> ToolsPayload {
-        let tools_payload = Self::tools_to_json(tools);
+        let tools_payload = self.convert_tools(Some(tools)).unwrap_or_default();
         ToolsPayload::OpenAI {
             tools: tools_payload,
         }
