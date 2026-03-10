@@ -259,8 +259,15 @@ static CJK_DEFERRED_ACTION_CUE_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(让我|我来|我会|我们来|我们会|我先|先让我|马上)").unwrap());
 
 /// Action verbs commonly used when promising to perform tool-backed work in CJK text.
+/// Excludes purely explanatory verbs like "分析", "拆解", "说明" that don't require tools.
 static CJK_DEFERRED_ACTION_VERB_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(查看|检查|搜索|查找|浏览|打开|读取|写入|运行|执行|调用|分析|验证|列出|获取|尝试|试试|继续|处理|修复|看看|看一看|看一下)").unwrap()
+    Regex::new(r"(查看|检查|搜索|查找|浏览|打开|读取|写入|运行|执行|调用|验证|列出|获取|尝试|试试|继续|处理|修复|看看|看一看|看一下)").unwrap()
+});
+
+/// Exclude explanatory phrases that shouldn't trigger the deferred-action detection.
+/// These are knowledge-based responses that don't require tool calls.
+static CJK_EXPLANATORY_PHRASE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(拆解|解释|说明|讲解|阐述|解答|回答|回答一下|详细说明|详细解释)").unwrap()
 });
 
 /// Fast check for CJK scripts (Han/Hiragana/Katakana/Hangul) so we only run
@@ -621,9 +628,12 @@ fn looks_like_deferred_action_without_tool_call(text: &str) -> bool {
         return true;
     }
 
-    CJK_SCRIPT_REGEX.is_match(trimmed)
-        && CJK_DEFERRED_ACTION_CUE_REGEX.is_match(trimmed)
-        && CJK_DEFERRED_ACTION_VERB_REGEX.is_match(trimmed)
+    let has_cjk = CJK_SCRIPT_REGEX.is_match(trimmed);
+    let has_cue = CJK_DEFERRED_ACTION_CUE_REGEX.is_match(trimmed);
+    let has_action_verb = CJK_DEFERRED_ACTION_VERB_REGEX.is_match(trimmed);
+    let has_explanatory = CJK_EXPLANATORY_PHRASE_REGEX.is_match(trimmed);
+
+    has_cjk && has_cue && has_action_verb && !has_explanatory
 }
 
 fn merge_continuation_text(existing: &str, next: &str) -> String {
@@ -1897,8 +1907,12 @@ pub async fn run_tool_call_loop(
         }
 
         if tool_calls.is_empty() {
-            let missing_tool_call_signal =
-                parse_issue_detected || looks_like_deferred_action_without_tool_call(&display_text);
+            let is_reasoner_model = active_model.to_lowercase().contains("reasoner");
+            let missing_tool_call_signal = if is_reasoner_model {
+                false
+            } else {
+                parse_issue_detected || looks_like_deferred_action_without_tool_call(&display_text)
+            };
             let missing_tool_call_followthrough = !missing_tool_call_retry_used
                 && iteration + 1 < max_iterations
                 && !tool_specs.is_empty()
@@ -6763,6 +6777,19 @@ Done."#;
         ));
         assert!(!looks_like_deferred_action_without_tool_call(
             "最新结果已经在上面整理完成。"
+        ));
+    }
+
+    #[test]
+    fn looks_like_deferred_action_ignores_explanatory_phrases() {
+        assert!(!looks_like_deferred_action_without_tool_call(
+            "这是一个深刻的心理学现象，我来详细拆解一下 🧠"
+        ));
+        assert!(!looks_like_deferred_action_without_tool_call(
+            "让我解释一下这个概念。"
+        ));
+        assert!(!looks_like_deferred_action_without_tool_call(
+            "让我说明一下原因。"
         ));
     }
 
