@@ -330,6 +330,9 @@ pub(crate) const DRAFT_CLEAR_SENTINEL: &str = "\x00CLEAR\x00";
 pub(crate) const DRAFT_PROGRESS_SENTINEL: &str = "\x00PROGRESS\x00";
 /// Sentinel prefix for full in-place progress blocks.
 pub(crate) const DRAFT_PROGRESS_BLOCK_SENTINEL: &str = "\x00PROGRESS_BLOCK\x00";
+/// Sentinel prefix for reasoning content from reasoner models (e.g., DeepSeek Reasoner).
+/// This allows channels to display the model's thinking process in real-time.
+pub(crate) const DRAFT_REASONING_SENTINEL: &str = "\x00REASONING\x00";
 /// Progress-section marker inserted into accumulated streaming drafts.
 pub(crate) const DRAFT_PROGRESS_SECTION_START: &str = "\n<!-- progress-start -->\n";
 /// Progress-section marker inserted into accumulated streaming drafts.
@@ -1569,6 +1572,29 @@ pub async fn run_tool_call_loop(
                             "raw_reason": raw_stop_reason.clone(),
                         }),
                     );
+                }
+
+                // 发送 reasoning content 到草稿（如果有的话）
+                if let Some(ref reasoning) = reasoning_content {
+                    if should_emit_tool_progress(progress_mode) {
+                        if let Some(ref tx) = on_delta {
+                            let truncated_reasoning = truncate_with_ellipsis(reasoning, 1500);
+                            let reasoning_block = format!(
+                                "\u{1f4dd} Reasoning:\n{}",
+                                truncated_reasoning
+                                    .lines()
+                                    .take(30)
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            );
+                            let _ = tx
+                                .send(format!(
+                                    "{}{}",
+                                    DRAFT_PROGRESS_BLOCK_SENTINEL, reasoning_block
+                                ))
+                                .await;
+                        }
+                    }
                 }
 
                 let mut continuation_attempts = 0usize;

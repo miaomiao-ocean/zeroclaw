@@ -779,6 +779,8 @@ fn should_expose_internal_tool_details(user_message: &str) -> bool {
 fn split_internal_progress_delta(delta: &str) -> (bool, &str) {
     if let Some(rest) = delta.strip_prefix(crate::agent::loop_::DRAFT_PROGRESS_SENTINEL) {
         (true, rest)
+    } else if let Some(rest) = delta.strip_prefix(crate::agent::loop_::DRAFT_REASONING_SENTINEL) {
+        (true, rest)
     } else {
         (false, delta)
     }
